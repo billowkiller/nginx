@@ -116,7 +116,6 @@ ngx_module_t  ngx_http_gunzip_filter_module = {
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt    ngx_http_next_body_filter;
 
-
 static ngx_int_t
 ngx_http_gunzip_header_filter(ngx_http_request_t *r)
 {
@@ -127,7 +126,7 @@ ngx_http_gunzip_header_filter(ngx_http_request_t *r)
 
     /* TODO support multiple content-codings */
     /* TODO always gunzip - due to configuration or module request */
-    /* TODO ignore content encoding? */
+    /* TODO ignore content encoding? ==> yes*/
 
     if (!conf->enable
         || r->headers_out.content_encoding == NULL
@@ -139,16 +138,10 @@ ngx_http_gunzip_header_filter(ngx_http_request_t *r)
     }
 
     r->gzip_vary = 1;
-
-    if (!r->gzip_tested) {
-        if (ngx_http_gzip_ok(r) == NGX_OK) {
-            return ngx_http_next_header_filter(r);
-        }
-
-    } else if (r->gzip_ok) {
-        return ngx_http_next_header_filter(r);
-    }
-
+	
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "gzip_test\n");
+	
     ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_gunzip_ctx_t));
     if (ctx == NULL) {
         return NGX_ERROR;
@@ -169,7 +162,6 @@ ngx_http_gunzip_header_filter(ngx_http_request_t *r)
 
     return ngx_http_next_header_filter(r);
 }
-
 
 static ngx_int_t
 ngx_http_gunzip_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
