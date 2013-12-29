@@ -465,13 +465,6 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
       offsetof(ngx_http_proxy_loc_conf_t, upstream.cache_lock_timeout),
       NULL },
 
-    { ngx_string("proxy_cache_revalidate"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot,
-      NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_proxy_loc_conf_t, upstream.cache_revalidate),
-      NULL },
-
 #endif
 
     { ngx_string("proxy_temp_path"),
@@ -629,8 +622,7 @@ static ngx_keyval_t  ngx_http_proxy_cache_headers[] = {
     { ngx_string("Keep-Alive"), ngx_string("") },
     { ngx_string("Expect"), ngx_string("") },
     { ngx_string("Upgrade"), ngx_string("") },
-    { ngx_string("If-Modified-Since"),
-      ngx_string("$upstream_cache_last_modified") },
+    { ngx_string("If-Modified-Since"), ngx_string("") },
     { ngx_string("If-Unmodified-Since"), ngx_string("") },
     { ngx_string("If-None-Match"), ngx_string("") },
     { ngx_string("If-Match"), ngx_string("") },
@@ -669,10 +661,41 @@ static ngx_path_init_t  ngx_http_proxy_temp_path = {
     ngx_string(NGX_HTTP_PROXY_TEMP_PATH), { 1, 2, 0 }
 };
 
+static ngx_int_t
+ngx_http_proxy_validate(ngx_http_request_t *r)
+{
+	
+	ngx_table_elt_t ** cookies = NULL;
+    ngx_uint_t i;
+
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "proxy validate");
+	ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "r->uri: %V\n", &r->uri);
+	if(r->headers_in.referer)
+	{
+		ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+							   "referer: %V\n", &r->headers_in.referer->value);
+	}
+
+    cookies = r->headers_in.cookies.elts;
+    for (i=0 ; i < r->headers_in.cookies.nelts; i++)
+		ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                 "Cookie line %i: %V\n" , i, &cookies[i]->value);
+
+	if(r->headers_in.host)
+	{
+		ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+							   "host: %V\n", &r->headers_in.host->value);
+	}
+
+	return 0;
+}
 
 static ngx_int_t
 ngx_http_proxy_handler(ngx_http_request_t *r)
 {
+	ngx_http_proxy_validate(r);
+
     ngx_int_t                   rc;
     ngx_http_upstream_t        *u;
     ngx_http_proxy_ctx_t       *ctx;
@@ -1615,12 +1638,18 @@ ngx_http_proxy_copy_filter(ngx_event_pipe_t *p, ngx_buf_t *buf)
         return NGX_OK;
     }
 
-    cl = ngx_chain_get_free_buf(p->pool, &p->free);
-    if (cl == NULL) {
-        return NGX_ERROR;
-    }
+    if (p->free) {
+        cl = p->free;
+        b = cl->buf;
+        p->free = cl->next;
+        ngx_free_chain(p->pool, cl);
 
-    b = cl->buf;
+    } else {
+        b = ngx_alloc_buf(p->pool);
+        if (b == NULL) {
+            return NGX_ERROR;
+        }
+    }
 
     ngx_memcpy(b, buf, sizeof(ngx_buf_t));
     b->shadow = buf;
@@ -1628,6 +1657,14 @@ ngx_http_proxy_copy_filter(ngx_event_pipe_t *p, ngx_buf_t *buf)
     b->last_shadow = 1;
     b->recycled = 1;
     buf->shadow = b;
+
+    cl = ngx_alloc_chain_link(p->pool);
+    if (cl == NULL) {
+        return NGX_ERROR;
+    }
+
+    cl->buf = b;
+    cl->next = NULL;
 
     ngx_log_debug1(NGX_LOG_DEBUG_EVENT, p->log, 0, "input buf #%d", b->num);
 
@@ -1693,12 +1730,18 @@ ngx_http_proxy_chunked_filter(ngx_event_pipe_t *p, ngx_buf_t *buf)
 
             /* a chunk has been parsed successfully */
 
-            cl = ngx_chain_get_free_buf(p->pool, &p->free);
-            if (cl == NULL) {
-                return NGX_ERROR;
-            }
+            if (p->free) {
+                cl = p->free;
+                b = cl->buf;
+                p->free = cl->next;
+                ngx_free_chain(p->pool, cl);
 
-            b = cl->buf;
+            } else {
+                b = ngx_alloc_buf(p->pool);
+                if (b == NULL) {
+                    return NGX_ERROR;
+                }
+            }
 
             ngx_memzero(b, sizeof(ngx_buf_t));
 
@@ -1711,6 +1754,14 @@ ngx_http_proxy_chunked_filter(ngx_event_pipe_t *p, ngx_buf_t *buf)
 
             *prev = b;
             prev = &b->shadow;
+
+            cl = ngx_alloc_chain_link(p->pool);
+            if (cl == NULL) {
+                return NGX_ERROR;
+            }
+
+            cl->buf = b;
+            cl->next = NULL;
 
             if (p->in) {
                 *p->last_in = cl;
@@ -2434,7 +2485,6 @@ ngx_http_proxy_create_loc_conf(ngx_conf_t *cf)
     conf->upstream.cache_valid = NGX_CONF_UNSET_PTR;
     conf->upstream.cache_lock = NGX_CONF_UNSET;
     conf->upstream.cache_lock_timeout = NGX_CONF_UNSET_MSEC;
-    conf->upstream.cache_revalidate = NGX_CONF_UNSET;
 #endif
 
     conf->upstream.hide_headers = NGX_CONF_UNSET_PTR;
@@ -2690,9 +2740,6 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_msec_value(conf->upstream.cache_lock_timeout,
                               prev->upstream.cache_lock_timeout, 5000);
-
-    ngx_conf_merge_value(conf->upstream.cache_revalidate,
-                              prev->upstream.cache_revalidate, 0);
 
 #endif
 
